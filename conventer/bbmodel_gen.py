@@ -547,8 +547,22 @@ def convert_animations_to_bb(anim_data, bone_to_uuid, model_name):
                     _lua = molang2lua(script)
                 except Exception:
                     _lua = "nil"
+                # YSM binds query.anim_time inside timeline/instruction keyframes to the
+                # playing animation's LOCAL time (executeTo path: setAnimTime(adjustedTick/20)),
+                # NOT the global avatar clock. Figura fires an instruction keyframe at its own
+                # timeline position, so animation:getTime() at fire time == that local tick,
+                # matching the mod. Bind _kf_at for the duration of the instruction (by anim
+                # name, robust to Figura not forwarding the Animation as a vararg here) and
+                # restore afterwards, exactly like _safe_kf does for baked bone-value exprs.
+                _an_lit = "'" + anim_name.replace("\\", "\\\\").replace("'", "\\'") + "'"
+                _wrapped = ("(function() local _p=ysm_state._kf_at "
+                            "local _A=(animations[ysm_model] or {})[" + _an_lit + "] "
+                            "if _A then local ok,t=pcall(function() return _A:getTime() end) "
+                            "if ok and type(t)=='number' then ysm_state._kf_at=t end end "
+                            "pcall(function() return " + _lua + " end) "
+                            "ysm_state._kf_at=_p end)()")
                 ekfs.append({"channel": "timeline", "interpolation": "linear", "time": tv,
-                             "data_points": [{"script": "pcall(function() return " + _lua + " end)"}]})
+                             "data_points": [{"script": _wrapped}]})
             if ekfs:
                 bb["animators"]["effects"] = {"keyframes": ekfs}
         _flip_x_anim(bb)
