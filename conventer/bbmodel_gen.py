@@ -329,15 +329,23 @@ def _safe_kf(expr):
     # keyframe eval error calls luaRuntime.error -> scriptError=true, which kills
     # the ENTIRE avatar (all animations + script stop). This makes one bad
     # keyframe a local, harmless 0 instead of a fatal avatar failure.
-    # Figura calls each keyframe value function as owner.run(fn, animationAPI, delta, animation),
-    # so the currently-playing Animation instance arrives as the 3rd vararg. Capture it and expose
-    # its LOCAL time (animation:getTime(), seconds, resets on (re)play and wraps on loop) as
-    # query.anim_time during evaluation, matching YSM/Bedrock semantics. Without this, q.anim_time
-    # would resolve to the global avatar clock and time-based keyframe exprs (e.g. eye-highlight
-    # glints) explode. _kf_at is restored afterwards so non-keyframe contexts keep the global clock.
-    return ("(function(...) local _a=select(3,...) local _prev=ysm_state._kf_at "
-            "if _a~=nil then local ok2,t=pcall(function() return _a:getTime() end) "
-            "if ok2 and type(t)=='number' then ysm_state._kf_at=t end end "
+    # Expose the currently-playing animation's LOCAL time (animation:getTime(), seconds, resets on
+    # (re)play and wraps on loop) as query.anim_time during keyframe evaluation, matching YSM/Bedrock
+    # semantics. Without this, q.anim_time resolves to the global avatar clock and time-based keyframe
+    # exprs (e.g. eye-highlight glints whose envelope is (0.5 - anim_time)) explode.
+    #
+    # Figura evaluates keyframe values via Avatar.run(fn, owner.animation, delta, animation), but
+    # owner.animation is the Instructions *limit* arg of run(toRun, limit, args...), NOT a vararg.
+    # FiguraLuaRuntime.run forwards only `args` to the Lua function, so the function actually receives
+    # varargs (delta, animation): the Animation is select(2,...), and select(3,...) is nil. Reading a
+    # fixed index was the bug. Scan every vararg for the object that answers :getTime() so we stay
+    # correct regardless of arg order/count. _kf_at is restored afterwards so non-keyframe contexts
+    # keep the global clock.
+    return ("(function(...) local _prev=ysm_state._kf_at "
+            "for _i=1,select('#',...) do local _c=select(_i,...) local _tc=type(_c) "
+            "if _tc=='userdata' or _tc=='table' then "
+            "local ok2,t=pcall(function() return _c:getTime() end) "
+            "if ok2 and type(t)=='number' then ysm_state._kf_at=t break end end end "
             "local ok,r=pcall(function() return " + expr +
             " end) ysm_state._kf_at=_prev if ok and type(r)=='number' then return r end return 0 end)(...)")
 

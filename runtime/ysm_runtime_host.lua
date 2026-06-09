@@ -138,7 +138,24 @@ local function build_host(self)
 		end, 0)
 	end
 	h.life_time = function() return self.seek / 20.0 end
-	h.anim_time = function() return self.seek / 20.0 end
+	-- query.anim_time = per-animation LOCAL time in seconds. YSM defines it as
+	-- adjustedTick/20.0 (AnimationControllerContext.animTime): it starts at 0 when
+	-- an animation (re)starts, wraps on loop, and freezes on hold/ending. It is NOT
+	-- the global clock -- that is query.life_time. Returning self.seek/20.0 here made
+	-- anim_time identical to life_time, breaking time-based keyframe expressions.
+	h.anim_time = function()
+		local c = self._active_ctrl or self.main_ctrl
+		if c and c.current and c.state ~= "idle" then
+			local a = c:adjust_tick(self.seek)
+			local len = c.current.length
+			if len and len > 0.0 then
+				if c.currentLoop == "loop" then a = a % len
+				elseif a > len then a = len end
+			end
+			return a / 20.0
+		end
+		return 0.0
+	end
 	h.delta_time = function() return self.dt end
 	h.health = function() return safe(function() return player:getHealth() end, 0) end
 	h.max_health = function() return safe(function() return player:getMaxHealth() end, 0) end
@@ -418,10 +435,12 @@ function H:render(delta, ctx)
 	local q = binding.make_query(self.host)
 	self.ctx = { query = q, variable = self.variable, temp = self.temp, this = 0 }
 
+	self._active_ctrl = nil
 	pcall(function() self.main_ctrl:set_animation(self:select_main()) end)
 	pcall(function() self:select_holds() end)
 
 	for _, c in ipairs(self.controllers) do
+		self._active_ctrl = c.ctrl
 		pcall(function() c.ctrl:process(seekTime, self.ctx) end)
 		pcall(function() c.ctrl:apply_to(self.processor, seekTime, false) end)
 	end
