@@ -329,8 +329,17 @@ def _safe_kf(expr):
     # keyframe eval error calls luaRuntime.error -> scriptError=true, which kills
     # the ENTIRE avatar (all animations + script stop). This makes one bad
     # keyframe a local, harmless 0 instead of a fatal avatar failure.
-    return ("(function() local ok,r=pcall(function() return " + expr +
-            " end) if ok and type(r)=='number' then return r end return 0 end)()")
+    # Figura calls each keyframe value function as owner.run(fn, animationAPI, delta, animation),
+    # so the currently-playing Animation instance arrives as the 3rd vararg. Capture it and expose
+    # its LOCAL time (animation:getTime(), seconds, resets on (re)play and wraps on loop) as
+    # query.anim_time during evaluation, matching YSM/Bedrock semantics. Without this, q.anim_time
+    # would resolve to the global avatar clock and time-based keyframe exprs (e.g. eye-highlight
+    # glints) explode. _kf_at is restored afterwards so non-keyframe contexts keep the global clock.
+    return ("(function(...) local _a=select(3,...) local _prev=ysm_state._kf_at "
+            "if _a~=nil then local ok2,t=pcall(function() return _a:getTime() end) "
+            "if ok2 and type(t)=='number' then ysm_state._kf_at=t end end "
+            "local ok,r=pcall(function() return " + expr +
+            " end) ysm_state._kf_at=_prev if ok and type(r)=='number' then return r end return 0 end)(...)")
 
 def _kv_to_dp(val):
     """Convert a keyframe value (scalar, [x,y,z], or MoLang string) to a data_point dict.
@@ -470,7 +479,9 @@ def convert_animations_to_bb(anim_data, bone_to_uuid, model_name):
                         for ci in range(3):
                             v = cd[ci] if ci < len(cd) else 0.0
                             nv, lv = _molang_or_numeric(v, _channel_name(ci))
-                            dp[_channel_name(ci)] = str(lv) if lv else float(nv)
+                            # Route through _safe_kf like the dict path so these constant-molang
+                            # keyframes also get the crash firewall AND local query.anim_time.
+                            dp[_channel_name(ci)] = _safe_kf(str(lv)) if lv else float(nv)
                         kfs.append({"channel": channel, "interpolation": "linear", "time": 0.0,
                                     "data_points": [dp], "_src_is_array": True})
                     else:

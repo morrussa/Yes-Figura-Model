@@ -81,6 +81,11 @@ def _lua_str(s):
     return '"' + s + '"'
 
 def molang2lua(expr):
+    # NOTE: expression-only KEYFRAME molang transpiler. It intentionally does NOT
+    # resolve user-function calls `fn.<name>(...)` -- those are handled by the
+    # statement-level compiler in script_gen.py (functions/*.molang). Per the YSM
+    # grammar a keyframe expression *could* legally call fn.*, but no known model
+    # does so in keyframes, so it is left unsupported here on purpose.
     if not expr or not expr.strip():
         return "nil"
     toks = _tokenize(expr)
@@ -107,9 +112,9 @@ def molang2lua(expr):
             consume(); left = parse_expr(0)
             if peek()[0] == ')': consume()
         elif t[0] == '-':
-            consume(); left = "(-" + parse_expr(8) + ")"
+            consume(); left = "(-_num(" + parse_expr(8) + "))"
         elif t[0] == '!':
-            consume(); left = "(not " + parse_expr(8) + " and 1 or 0)"
+            consume(); left = "((not _truth(" + parse_expr(8) + ")) and 1 or 0)"
         elif t[0] == '{':
             consume()
             exprs = []
@@ -152,9 +157,9 @@ def molang2lua(expr):
                     true_e = parse_expr(0)
                     if peek()[0] == ':':
                         consume(); false_e = parse_expr(prec)
-                        left = "((function() if " + left + " then return " + true_e + " else return " + false_e + " end end)())"
+                        left = "((function() if _truth(" + left + ") then return " + true_e + " else return " + false_e + " end end)())"
                     else:
-                        left = "((function() if " + left + " then return " + true_e + " end end)())"
+                        left = "((function() if _truth(" + left + ") then return " + true_e + " end end)())"
             elif t[0] == '=':
                 consume(); right = parse_expr(prec)
                 if left.startswith('ysm_v[') or left.startswith('ysm_c[') or left.startswith('ysm_t['):
@@ -169,19 +174,24 @@ def molang2lua(expr):
                 left = "(((nil_or(" + left + ")) or " + right + "))"
             elif t[0] == '&&':
                 consume(); right = parse_expr(prec)
-                left = "(" + left + " and " + right + ")"
+                left = "((_truth(" + left + ") and _truth(" + right + ")) and 1 or 0)"
             elif t[0] == '||':
                 consume(); right = parse_expr(prec)
-                left = "(" + left + " or " + right + ")"
+                left = "((_truth(" + left + ") or _truth(" + right + ")) and 1 or 0)"
             elif t[0] in ('==','!=','<','<=','>','>='):
                 op = t[0]; consume(); right = parse_expr(prec)
-                if op == '==': lua_op = '=='
-                elif op == '!=': lua_op = '~='
-                else: lua_op = op
-                left = "((" + left + " " + lua_op + " " + right + " and 1 or 0))"
+                if op == '==':
+                    left = "(_eq(" + left + "," + right + ") and 1 or 0)"
+                elif op == '!=':
+                    left = "((not _eq(" + left + "," + right + ")) and 1 or 0)"
+                else:
+                    left = "((_num(" + left + ") " + op + " _num(" + right + ")) and 1 or 0)"
             elif t[0] in ('+','-','*','/','%'):
                 op = t[0]; consume(); right = parse_expr(prec)
-                left = "(" + left + " " + op + " " + right + ")"
+                if op == '/':
+                    left = "_div(" + left + "," + right + ")"
+                else:
+                    left = "(_num(" + left + ") " + op + " _num(" + right + "))"
             else:
                 break
         return left
@@ -245,9 +255,13 @@ ysm_loop=function(c,f)c=math.min(math.floor(c or 0),1024);for i=1,c do f()end en
 ysm_for_each=function()end
 nil_or=function(v)return v end
 _assign=function(t,v)return v end
+_num=function(x) if type(x)=='number' then if x~=x then return 0 end return x end if x==true then return 1 end if x==nil or x==false then return 0 end local n=tonumber(x); return n or 0 end
+_truth=function(x) if x==nil or x==false or x==0 then return false end if x==ysm_safezero then return false end if type(x)=='number' and x~=x then return false end return true end
+_div=function(a,b) a=_num(a) b=_num(b) if b==0 then return 0 end return a/b end
+_eq=function(a,b) if a==b then return true end if type(a)=='number' or type(b)=='number' then return _num(a)==_num(b) end return false end
 
 ysm_q={}
-ysm_q.anim_time=function()return ysm_state.at end
+ysm_q.anim_time=function()if ysm_state._kf_at~=nil then return ysm_state._kf_at end return ysm_state.at end
 ysm_q.life_time=function()return ysm_state.lt end
 ysm_q.time_of_day=function()return world.getTime()%24000/24000 end
 ysm_q.delta_time=function()return ysm_state.dt end
@@ -288,6 +302,8 @@ ysm_q.position_delta=function()return function(axis)local ok,p=pcall(function()r
 ysm_q.time_stamp=function()local ok,v=pcall(function()return world.getTime()end)return ok and v or 0 end
 ysm_q.eye_target_y_rotation=function()local ok,v=pcall(function()return vanilla_model.HEAD:getRot().y end)return ok and v or 0 end
 ysm_q.is_item_name_any=function()return function(slot,...)local items={...}local ok,it=pcall(function()return player:getHeldItem(slot=='offhand')end)if not ok or not it then return 0 end;local ok2,id=pcall(function()return it:getID()end)if not ok2 or not id then return 0 end;for _,n in ipairs(items)do if id==n then return 1 end end;return 0 end end
+ysm_q.cardinal_facing_2d=function()local ok,y=pcall(function()return player:getRot().y end)if not ok or not y then return 2 end;local i=math.floor(((y%360)/90)+0.5)%4;local m={[0]=3,[1]=4,[2]=2,[3]=5};return m[i]or 2 end
+ysm_q.relative_block_has_any_tag=function()return function(dx,dy,dz,...)dx=dx or 0;dy=dy or 0;dz=dz or 0;if math.abs(dx)>5 or math.abs(dy)>5 or math.abs(dz)>5 then return 0 end;local tags={...};local ok,res=pcall(function()local p=player:getPos();local bs=world.getBlockState(vec(math.floor(p.x+dx),math.floor(p.y+dy),math.floor(p.z+dz)));if not bs then return 0 end;local bt=bs:getTags();if not bt then return 0 end;local set={};for _,t in ipairs(bt) do local s=tostring(t);set[s]=true;set['minecraft:'..s]=true end;for _,w in ipairs(tags) do local ws=tostring(w);if set[ws] or set['minecraft:'..ws] then return 1 end end;return 0 end)return (ok and res)or 0 end end
 ysm_safezero=setmetatable({},{__call=function()return ysm_safezero end,__index=function()return ysm_safezero end,__add=function()return 0 end,__sub=function()return 0 end,__mul=function()return 0 end,__div=function()return 0 end,__mod=function()return 0 end,__unm=function()return 0 end,__pow=function()return 0 end,__lt=function()return false end,__le=function()return false end,__len=function()return 0 end,__tostring=function()return '0' end})
 setmetatable(ysm_q,{__index=function()return function()return ysm_safezero end end})
 
@@ -319,16 +335,36 @@ ysm.input_horizontal=0
 ysm.elytra_rot_z=0
 ysm.is_close_eyes=false
 ysm.yya=0
+ysm.fps=60
+ysm.ground_speed2=0
+ysm.rendering_in_inventory=false
+ysm.in_shield_block_cooldown=false
+ysm.mod_version=function()return '2.5.0' end  -- no Figura API exposes the host's mod version; reports a constant (no real equivalent exists)
+ysm._keys={}
+ysm.keyboard=function(k)if k==nil then return 0 end;k=tostring(k):lower();local kb=ysm._keys[k];if kb~=nil then local ok,p=pcall(function()return kb:isPressed()end);return (ok and p) and 1 or 0 end;local ok,r=pcall(function()if k=='space' or k=='jump' then return host:isJumping() and 1 or 0 end;if k=='shift' or k=='sneak' then return player:isSneaking() and 1 or 0 end;return 0 end)return (ok and r) or 0 end
+if keybinds then
+  local function _reg(ch,key) local ok,kb=pcall(function()return keybinds:newKeybind('ysm.kb.'..key,'key.keyboard.'..key)end);if ok and kb then ysm._keys[ch]=kb end end
+  local _alnum='abcdefghijklmnopqrstuvwxyz0123456789'
+  for i=1,#_alnum do local c=_alnum:sub(i,i);_reg(c,c)end
+  local _sym={['-']='minus',['=']='equal',['[']='left.bracket',[']']='right.bracket',[';']='semicolon',["'"]='apostrophe',[',']='comma',['.']='period',['/']='slash',['`']='grave.accent',[' ']='space'}
+  _sym[string.char(92)]='backslash'
+  for ch,key in pairs(_sym)do _reg(ch,key)end
+end
 ysm.texture_name=ysm_model or ''
 function ysm.particle(name,x,y,z)pcall(function()if x~=nil then particles:newParticle(name,vec(x,y or 0,z or 0))else particles:newParticle(name)end end)end
 function ysm.stop_sound(name)pcall(function()if sounds and sounds.stopSound then sounds:stopSound(name)elseif sounds and sounds.stop then sounds:stop(name)end end)end
 function ysm.bone_pivot_abs(name)local m=models[ysm_model];local p=m and ysm_find_bone(m,name)if not p then return{x=0,y=0,z=0}end;local ok,v=pcall(function()return p:partToWorldMatrix():apply(0,0,0)end)if ok and v then return{x=v.x,y=v.y,z=v.z}end;return{x=0,y=0,z=0}end
 function ysm.play_sound(id,name,vol)pcall(function()local n=name or id;if sounds and sounds.playSound then sounds:playSound(n,(player and player:getPos())or vec(0,0,0),vol or 1)end end)end
-function ysm.second_order(id,x,f,z,r)x=x or 0;f=(f and f>0)and f or 1;z=z or 1;r=r or 0;if not ysm_state._so then ysm_state._so={}end;local pi=math.pi;local k1=z/(pi*f);local k2=1/((2*pi*f)^2);local k3=r*z/(2*pi*f);local now;local ok,sm=pcall(function()return client:getSystemTime()/1000 end);if ok and sm then now=sm else now=(world and world.getTime and world.getTime() or 0)/20 end;local st=ysm_state._so[id];if not st then ysm_state._so[id]={y=x,yd=0,xp=x,t=now};return x end;local T=now-st.t;if T<=0 then return st.y end;if T>0.1 then T=0.1 end;local xd=(x-st.xp)/T;st.xp=x;local k2s=math.max(k2,T*T/2+T*k1/2,T*k1);st.y=st.y+T*st.yd;st.yd=st.yd+T*(x+k3*xd-st.y-k1*st.yd)/k2s;st.t=now;return st.y end
 events.TICK:register(function()
   local ok,v=pcall(function()return player:getFood()end);if ok and v then ysm.food_level=v end
   local okm,itm=pcall(function()return player:getHeldItem(false)end);if okm and itm then local oe,e=pcall(function()return itm:isEmpty()end);ysm.has_mainhand=(oe and (not e))or false end
   local oko,ito=pcall(function()return player:getHeldItem(true)end);if oko and ito then local oe2,e2=pcall(function()return ito:isEmpty()end);ysm.has_offhand=(oe2 and (not e2))or false end
+  local okf,fp=pcall(function()return client:getFPS()end);if okf and fp and fp>0 then ysm.fps=fp end
+  local okg,gv=pcall(function()return player:getVelocity()end);if okg and gv then ysm.ground_speed2=math.sqrt(gv.x*gv.x+gv.z*gv.z)*20 end
+  local oksb,sb=pcall(function()local it=world.newItem('minecraft:shield');return player:getCooldownPercent(it)end);ysm.in_shield_block_cooldown=(oksb and type(sb)=='number' and sb>0)or false
+end)
+events.RENDER:register(function(delta,ctx)
+  local _okfp,_fp=pcall(function()return renderer:isFirstPerson()end);ysm.rendering_in_inventory=(_okfp and (not _fp))or false  -- YSM source maps this to CameraUtil::isThirdPerson
 end)
 
 function ysm.head_pitch()local ok,v=pcall(function()return vanilla_model.HEAD:getRot().x end)return ok and v or 0 end
@@ -369,11 +405,11 @@ function ysm._update_physics(dt)
     local r=so.r or 1
     local inp=so.inp or 0
     local k1=d/ysm_pi/f
-    local k2=1/math.pow(2*ysm_pi*f,2)
+    local k2=1/((2*ysm_pi*f)^2)
     local k3=r*d/2/ysm_pi/f
     local inpDot=(inp-so.prev)/dt;so.prev=inp
     local maxDt=math.sqrt(4*k2+k1*k1)-k1
-    local cyc=math.max(1,math.ceil(dt/maxDt))
+    local cyc=math.min(256,math.max(1,math.ceil(dt/maxDt)))
     local sDt=dt/cyc
     local l=so.last;local ld=so.lastDot
     for _=1,cyc do
@@ -556,7 +592,7 @@ function ysm_loco_tick()
   end
 end
 
-function events:ENTITY_INIT()
+events.ENTITY_INIT:register(function()
   pcall(function()vanilla_model.ALL:setVisible(false)end)
   if ysm_model_scale_x then
     pcall(function()models[ysm_model]:setScale(ysm_model_scale_x,ysm_model_scale_y,ysm_model_scale_z)end)
@@ -623,11 +659,11 @@ function events:ENTITY_INIT()
     for k,def in pairs(W.pages or {})do fill(k,def)end
     if pages['__main__'] then action_wheel:setPage(pages['__main__'])end
   end)
-end
+end)
 
 ysm_state._tc=0
 
-function events:TICK()
+events.TICK:register(function()
   local wt=world.getTime()
   local lw=ysm_state._last_wt
   if lw>0 and wt>lw then
@@ -637,11 +673,10 @@ function events:TICK()
     ysm_state.dt=0.016
   end
   ysm_state._last_wt=wt
-  ysm._update_physics(ysm_state.dt)
   ysm_loco_tick()
   for n,_ in pairs(ysm_ctrls)do ysm_ctrl_tick(n)end
   ysm_extra_tick()
-end
+end)
 
 -- Animation clock + per-frame bone application.
 -- In YSM, query.anim_time = adjustedTick/20.0 -> GAME-TIME seconds, smoothed by
@@ -665,6 +700,10 @@ events.WORLD_RENDER:register(function(delta)
     if not ysm_state._t0 then ysm_state._t0=sec end
     ysm_state.at=sec-ysm_state._t0
     ysm_state.lt=sec-ysm_state._t0
+    if (ysm_state._phys_last or -1)>=0 and gt>ysm_state._phys_last then
+      ysm._update_physics((gt-ysm_state._phys_last)/20)
+    end
+    ysm_state._phys_last=gt
   else
     ysm_state.at=ysm_state.at+(ysm_state.dt or 0.016)
     ysm_state.lt=ysm_state.lt+(ysm_state.dt or 0.016)
@@ -1572,6 +1611,17 @@ def gen_lua(ysm_path, project_dir, model_name, ysm_json, animations_by_bone, dyn
             lines.append("  local at=animations[ysm_model] or {}")
             lines.append("  for _,n in ipairs(ysm._base_layers) do local a=at[n]; if a and not ysm_anim_playing(a) then pcall(function() a:setPriority(0):play() end) end end")
             lines.append("end)")
+
+    # YSM 2.5.0 custom-function / script (molang script) support
+    try:
+        from . import script_gen
+        _files_section = ysm_json.get("files", {}) if isinstance(ysm_json, dict) else {}
+        _script_block, _script_summary = script_gen.gen_scripts(ysm_path, _files_section)
+        if _script_block:
+            lines.append(_script_block)
+            print(f"    [scripts] {_script_summary}")
+    except Exception as _e:
+        print(f"    [scripts] skipped: {_e}")
 
     lines.append(f"\n-- end of generated YSM avatar")
 
