@@ -288,10 +288,10 @@ ysm_q.player_level=function()local ok,v=pcall(function()return player:getExperie
 ysm_q.ground_speed=function()local ok,v=pcall(function()return player:getVelocity()end)if ok and v then return math.sqrt(v.x*v.x+v.z*v.z)*20 end;return 0 end
 ysm_q.vertical_speed=function()local ok,v=pcall(function()return player:getVelocity()end)return ok and v and v.y*20 or 0 end
 ysm_q.yaw_speed=function()local cy=player:getBodyYaw();local oy=ysm_state._last_yaw;ysm_state._last_yaw=cy;if oy then return(cy-oy)*20 end;return 0 end
-ysm_q.head_x_rotation=function()local ok,v=pcall(function()return vanilla_model.HEAD:getRot().y end)return ok and v or 0 end
-ysm_q.head_y_rotation=function()local ok,v=pcall(function()return vanilla_model.HEAD:getRot().x end)return ok and v or 0 end
-ysm_q.body_x_rotation=function()local ok,v=pcall(function()return vanilla_model.BODY:getRot().y end)return ok and v or 0 end
-ysm_q.body_y_rotation=function()local ok,v=pcall(function()return vanilla_model.BODY:getRot().x end)return ok and v or 0 end
+ysm_q.head_x_rotation=function()local ok,v=pcall(function()return vanilla_model.HEAD:getOriginRot().y end)if not ok or type(v)~='number' then return 0 end if v>85 then v=85 elseif v<-85 then v=-85 end return v end
+ysm_q.head_y_rotation=function()local ok,v=pcall(function()return vanilla_model.HEAD:getOriginRot().x end)return ok and v or 0 end
+ysm_q.body_x_rotation=function()local ok,v=pcall(function()return vanilla_model.BODY:getOriginRot().y end)return ok and v or 0 end
+ysm_q.body_y_rotation=function()local ok,v=pcall(function()return vanilla_model.BODY:getOriginRot().x end)return ok and v or 0 end
 ysm_q.is_creative=function()local ok,v=pcall(function()return player:getGamemode()end)return ok and v=='creative' end
 ysm_q.can_fly=function()local ok,v=pcall(function()return host:isFlying()end)return ok and v or false end
 ysm_q.is_climbing=function()local ok,v=pcall(function()return player:isClimbing()end)return ok and v or false end
@@ -300,7 +300,7 @@ ysm_q.is_dead=function()local ok,a=pcall(function()return player:isAlive()end)if
 ysm_q.position=function()return function(axis)local ok,p=pcall(function()return player:getPos()end)if not ok or not p then return 0 end;axis=axis or 0;if axis==0 then return p.x elseif axis==1 then return p.y else return p.z end end end
 ysm_q.position_delta=function()return function(axis)local ok,p=pcall(function()return player:getPos()end)if not ok or not p then return 0 end;local st=ysm_state;if st._pd_t~=st.lt then st._pd_prev=st._pd_cur;st._pd_cur={p.x,p.y,p.z};st._pd_t=st.lt end;local cur=st._pd_cur or {p.x,p.y,p.z};local prev=st._pd_prev or cur;axis=(axis or 0)+1;return (cur[axis] or 0)-(prev[axis] or 0)end end
 ysm_q.time_stamp=function()local ok,v=pcall(function()return world.getTime()end)return ok and v or 0 end
-ysm_q.eye_target_y_rotation=function()local ok,v=pcall(function()return vanilla_model.HEAD:getRot().y end)return ok and v or 0 end
+ysm_q.eye_target_y_rotation=function()local ok,v=pcall(function()return vanilla_model.HEAD:getOriginRot().y end)return ok and v or 0 end
 ysm_q.is_item_name_any=function()return function(slot,...)local items={...}local ok,it=pcall(function()return player:getHeldItem(slot=='offhand')end)if not ok or not it then return 0 end;local ok2,id=pcall(function()return it:getID()end)if not ok2 or not id then return 0 end;for _,n in ipairs(items)do if id==n then return 1 end end;return 0 end end
 ysm_q.cardinal_facing_2d=function()local ok,y=pcall(function()return player:getRot().y end)if not ok or not y then return 2 end;local i=math.floor(((y%360)/90)+0.5)%4;local m={[0]=3,[1]=4,[2]=2,[3]=5};return m[i]or 2 end
 ysm_q.relative_block_has_any_tag=function()return function(dx,dy,dz,...)dx=dx or 0;dy=dy or 0;dz=dz or 0;if math.abs(dx)>5 or math.abs(dy)>5 or math.abs(dz)>5 then return 0 end;local tags={...};local ok,res=pcall(function()local p=player:getPos();local bs=world.getBlockState(vec(math.floor(p.x+dx),math.floor(p.y+dy),math.floor(p.z+dz)));if not bs then return 0 end;local bt=bs:getTags();if not bt then return 0 end;local set={};for _,t in ipairs(bt) do local s=tostring(t);set[s]=true;set['minecraft:'..s]=true end;for _,w in ipairs(tags) do local ws=tostring(w);if set[ws] or set['minecraft:'..ws] then return 1 end end;return 0 end)return (ok and res)or 0 end end
@@ -367,8 +367,8 @@ events.RENDER:register(function(delta,ctx)
   local _okfp,_fp=pcall(function()return renderer:isFirstPerson()end);ysm.rendering_in_inventory=(_okfp and (not _fp))or false  -- YSM source maps this to CameraUtil::isThirdPerson
 end)
 
-function ysm.head_pitch()local ok,v=pcall(function()return vanilla_model.HEAD:getRot().x end)return ok and v or 0 end
-function ysm.head_yaw()local ok,v=pcall(function()return vanilla_model.HEAD:getRot().y end)return ok and v or 0 end
+function ysm.head_pitch()local ok,v=pcall(function()return vanilla_model.HEAD:getOriginRot().x end)return ok and v or 0 end
+function ysm.head_yaw()local ok,v=pcall(function()return vanilla_model.HEAD:getOriginRot().y end)if not ok or type(v)~='number' then return 0 end if v>85 then v=85 elseif v<-85 then v=-85 end return v end
 
 function ysm_find_bone(model, name)
   local path=ysm._bone_paths[name]
