@@ -146,15 +146,28 @@ local function build_host(self)
 	h.anim_time = function()
 		local c = self._active_ctrl or self.main_ctrl
 		if c and c.current and c.state ~= "idle" then
-			local a = c:adjust_tick(self.seek)
-			local len = c.current.length
-			if len and len > 0.0 then
-				if c.currentLoop == "loop" then a = a % len
-				elseif a > len then a = len end
+			local at
+			if c.state == "begin" then
+				-- YSM BEGINNING_TRANSITION: setAnimTime(0.0)
+				at = 0.0
+			elseif c.state == "ending" then
+				-- YSM ENDING_TRANSITION: setAnimTime(savedEndingTick/20), frozen
+				at = (c.savedEndingTick or 0.0) / 20.0
+			else
+				-- YSM RUNNING: setAnimTime(adjustedTick/20) with loop-wrap / hold-clamp
+				local a = c:adjust_tick(self.seek)
+				local len = c.current.length
+				if len and len > 0.0 then
+					if c.currentLoop == "loop" then a = a % len
+					elseif a > len then a = len end
+				end
+				at = a / 20.0
 			end
-			return a / 20.0
+			self._last_at = at
+			return at
 		end
-		return 0.0
+		-- YSM IDLE: process() doesn't call setAnimTime, so animTime retains its last value
+		return self._last_at or 0.0
 	end
 	h.delta_time = function() return self.dt end
 	h.health = function() return safe(function() return player:getHealth() end, 0) end
@@ -264,6 +277,8 @@ function H.new(D, opts)
 	local function make_ctrl(transition)
 		local c = Ctrl.new({
 			transition = transition or 0.0,
+			-- YSM PredicateBasedController always uses isScaleTransitionSpecial=true
+			scale_special = true,
 			get_animation = get_anim,
 			initial_rotation = init_rot,
 		})
@@ -442,7 +457,7 @@ function H:render(delta, ctx)
 	for _, c in ipairs(self.controllers) do
 		self._active_ctrl = c.ctrl
 		pcall(function() c.ctrl:process(seekTime, self.ctx) end)
-		pcall(function() c.ctrl:apply_to(self.processor, seekTime, false) end)
+		pcall(function() c.ctrl:apply_to(self.processor, seekTime, c.ctrl:is_deprecated_mode()) end)
 	end
 	pcall(function() self.processor:finalize(seekTime) end)
 

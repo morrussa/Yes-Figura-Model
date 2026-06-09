@@ -180,6 +180,7 @@ function M.new(opts)
 	return setmetatable({
 		transition = opts.transition or 0.0,
 		scale_special = opts.scale_special or false,
+		deprecated = opts.deprecated or false,
 		get_animation = opts.get_animation,
 		pose_provider = opts.pose_provider,
 		initial_rotation = opts.initial_rotation,
@@ -230,6 +231,9 @@ function Ctrl:apply_pending()
 			posOffset = snapshot.pos or v3(0, 0, 0),
 			scaleOffset = snapshot.scale or v3(1, 1, 1),
 			outRot = nil, outPos = nil, outScale = nil,   -- saved on ending
+			-- YSM overrideMode = !scaleKeyFrames.isEmpty() (applyAnimation z arg):
+			-- when true the fade-OUT ConstantPoint is INSTANT (totalTick=0).
+			overrideMode = chans.scale ~= nil,
 		}
 		self.active[#self.active + 1] = entry
 		self.queues[boneName] = {}
@@ -306,9 +310,12 @@ function Ctrl:end_transition(ctx, f)
 	for _, e in ipairs(self.active) do
 		e.blendWeight = bw
 		local q = self.queues[e.bone]
-		if e.outRot then q.rot = make_const_point(f, DEFAULT_ENDING_TICK, e.outRot) end
-		if e.outPos then q.pos = make_const_point(f, DEFAULT_ENDING_TICK, e.outPos) end
-		if e.outScale then q.scale = make_const_point(f, DEFAULT_ENDING_TICK, e.outScale) end
+		-- YSM getConstantPointAtTick: totalTick = isInstant?0:defaultTransitionTick,
+		-- where isInstant = overrideMode. Instant => percent jumps to 1 immediately.
+		local tt = e.overrideMode and 0.0 or DEFAULT_ENDING_TICK
+		if e.outRot then q.rot = make_const_point(f, tt, e.outRot) end
+		if e.outPos then q.pos = make_const_point(f, tt, e.outPos) end
+		if e.outScale then q.scale = make_const_point(f, tt, e.outScale) end
 	end
 end
 
@@ -389,5 +396,7 @@ end
 
 function Ctrl:get_state() return self.state end
 function Ctrl:is_finished() return self.finished end
+-- YSM PredicateBasedController.isDeprecatedMode(): deprecatedMode && state==RUNNING
+function Ctrl:is_deprecated_mode() return self.deprecated and self.state == "running" end
 
 return M

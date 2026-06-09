@@ -261,7 +261,7 @@ _div=function(a,b) a=_num(a) b=_num(b) if b==0 then return 0 end return a/b end
 _eq=function(a,b) if a==b then return true end if type(a)=='number' or type(b)=='number' then return _num(a)==_num(b) end return false end
 
 ysm_q={}
-ysm_q.anim_time=function()if ysm_state._kf_at~=nil then return ysm_state._kf_at end return ysm_state.at end
+ysm_q.anim_time=function() if ysm_state._kf_at~=nil then return ysm_state._kf_at end local c=ysm_ctrl_cur if c and c._cur then local _at=animations[ysm_model] local _a=_at and _at[c._cur] if _a then local ok,t=pcall(function() return _a:getTime() end) if ok and type(t)=='number' then return t end end end return ysm_state.at end
 ysm_q.life_time=function()return ysm_state.lt end
 ysm_q.time_of_day=function()return world.getTime()%24000/24000 end
 ysm_q.delta_time=function()return ysm_state.dt end
