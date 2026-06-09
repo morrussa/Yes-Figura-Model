@@ -34,5 +34,7 @@ output/模型名/
 
 直接把整个 `output/模型名/` 文件夹复制到 `~/.figura/avatars/` 或
 `%appdata%/.figura/avatars/` 即可。
+
 一般需要改改，运气好可以直接用。
+
 虽然有openYSM打底，让我的工作变得更加轻松，但是没轻松到哪里去。希望有极端情况的适配并pr，我也不是很想收集ysm模型
