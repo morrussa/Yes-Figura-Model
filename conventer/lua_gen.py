@@ -161,7 +161,11 @@ def molang2lua(expr):
                     else:
                         left = "((function() if _truth(" + left + ") then return " + true_e + " end end)())"
             elif t[0] == '=':
-                consume(); right = parse_expr(prec)
+                # Assignment RHS is a full expression. Note molang ternary `a?b:c`
+                # has LOWER precedence than '=' (0 vs 1), so we must parse the RHS
+                # with minp=0 to capture it; otherwise `v.qh=!v.jump?x` would bind
+                # as `(v.qh=!v.jump) ? x` and silently drop the ternary value.
+                consume(); right = parse_expr(0)
                 if left.startswith('ysm_v[') or left.startswith('ysm_c[') or left.startswith('ysm_t['):
                     left = "(function() " + left + "=" + right + ";return " + right + " end)()"
                 else:
@@ -225,6 +229,65 @@ def molang2lua(expr):
         return parse_expr(0)
     except Exception:
         return "0"
+
+
+def _split_top_level_semicolons(expr):
+    """Split a molang source string on top-level ';' separators, ignoring any
+    ';' nested inside (), [], {} or string literals. Used to support
+    multi-statement molang blocks (e.g. animation `timeline` instructions)."""
+    parts = []
+    cur = []
+    depth = 0
+    in_str = None
+    i = 0
+    n = len(expr)
+    while i < n:
+        c = expr[i]
+        if in_str is not None:
+            cur.append(c)
+            if c == in_str:
+                in_str = None
+            i += 1
+            continue
+        if c == "'" or c == '"':
+            in_str = c
+            cur.append(c)
+        elif c in '([{':
+            depth += 1
+            cur.append(c)
+        elif c in ')]}':
+            depth -= 1
+            cur.append(c)
+        elif c == ';' and depth == 0:
+            parts.append(''.join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    if cur:
+        parts.append(''.join(cur))
+    return [p for p in parts if p.strip()]
+
+
+def molang2lua_block(expr):
+    """Compile a (possibly multi-statement) molang block into a single Lua
+    expression. `molang2lua` is expression-only and stops at the first top-level
+    ';', which silently dropped every statement after the first -- the root
+    cause of swing/attack animations not playing, because the keyframe values
+    depend on variables (e.g. v.qh, v.jump, v.random) assigned by the animation
+    `timeline`'s later statements. Each statement is executed in order; the
+    whole block evaluates to nil."""
+    if not expr or not expr.strip():
+        return "nil"
+    stmts = _split_top_level_semicolons(expr)
+    if not stmts:
+        return "nil"
+    if len(stmts) == 1:
+        return molang2lua(stmts[0])
+    body = []
+    for s in stmts:
+        body.append("do local _=(" + molang2lua(s) + ") end")
+    return "(function() " + " ".join(body) + " return nil end)()"
 
 # =============================================================================
 #  Lua code generator
@@ -458,7 +521,7 @@ function ysm._apply_dynamic_bones()
     local hp=ysm.head_pitch()or 0;local hy=ysm.head_yaw()or 0
     local cr=h:getRot();local cx,cy,cz=cr.x,cr.y,cr.z
     if not ysm._head_overridden then
-      h:setRot(hp/2, hy/2, cz)
+      h:setRot(hp, hy, cz)
     end
     ysm._head_overridden=false
   end
@@ -945,7 +1008,7 @@ function ysm_hold_tick()
         if a then
           local len=1.0; local okl,L=pcall(function() return a:getLength() end)
           if okl and type(L)=="number" and L>0 then len=L end
-          pcall(function() a:setPriority(4):setBlend(1):play() end)
+          pcall(function() a:setPriority(4):setBlend(1):setOverride(true):play() end)
           ysm_state._sw={anim=nm, t1=nowt+len}
         else ysm_state._sw=nil end
       else ysm_state._sw=nil end
@@ -1062,7 +1125,7 @@ events.RENDER:register(function(delta, ctx)
 end)
 """
 
-def gen_lua(ysm_path, project_dir, model_name, ysm_json, animations_by_bone, dynamic_bones=None, bone_paths=None, optimize=True, annotations=None, role_models=None):
+def gen_lua(ysm_path, project_dir, model_name, ysm_json, animations_by_bone, dynamic_bones=None, bone_paths=None, optimize=True, annotations=None, role_models=None, projectile_models=None):
     files = ysm_json.get("files", {})
     player = files.get("player", {})
     props = ysm_json.get("properties", {})
@@ -1622,6 +1685,30 @@ def gen_lua(ysm_path, project_dir, model_name, ysm_json, animations_by_bone, dyn
             print(f"    [scripts] {_script_summary}")
     except Exception as _e:
         print(f"    [scripts] skipped: {_e}")
+
+    # ---- Projectile reskins: arrow / trident entity models -----------------
+    # Figura renders a model part whose parentType is "Arrow"/"Trident" directly
+    # on the matching projectile entity shot by the avatar owner. Such a part is
+    # "separate": it is skipped in the normal body pass and drawn only on the
+    # projectile, and Avatar.renderArrow/renderTrident return true once it draws,
+    # which cancels the vanilla projectile model. IMPORTANT: we must NOT return
+    # true from ARROW_RENDER/TRIDENT_RENDER -- the mixin is
+    #   if (eventReturnedTrue || avatar.renderArrow(...))
+    # so returning true short-circuits renderArrow and would suppress our own
+    # model. Setting the parent type is therefore the whole mechanism. The user
+    # also needs the avatar's "Vanilla Model Change" permission enabled (default).
+    _projs = projectile_models or []
+    if _projs:
+        lines.append("\n-- projectile reskins: render YSM arrow/trident models on the real entities")
+        lines.append("events.ENTITY_INIT:register(function()")
+        for _pm in _projs:
+            _stem = _pm["stem"] if isinstance(_pm, dict) else _pm
+            _ptype = (_pm.get("parent_type") if isinstance(_pm, dict) else None) or "Arrow"
+            lines.append(
+                f"  pcall(function() local p = models[{to_lua_val(_stem)}]; "
+                f"if p then p:setParentType({to_lua_val(_ptype)}) end end)"
+            )
+        lines.append("end)")
 
     lines.append(f"\n-- end of generated YSM avatar")
 

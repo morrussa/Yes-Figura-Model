@@ -6,7 +6,7 @@ import base64
 import re
 from pathlib import Path
 
-from .lua_gen import molang2lua
+from .lua_gen import molang2lua, molang2lua_block
 
 # --- Bedrock(left-handed) -> Blockbench/Figura "free"(right-handed) X-axis flip ---
 # geckolib renders raw Bedrock geometry inside Minecraft's entity renderer, which
@@ -532,10 +532,10 @@ def convert_animations_to_bb(anim_data, bone_to_uuid, model_name):
                                             "data_points": [dp], "_src_is_array": False})
             if kfs:
                 bb["animators"][guuid] = {"keyframes": kfs}
-        # timeline
+        # timeline + keyframe effects -> one shared "effects" animator
+        ekfs = []
         tl = anim_obj.get("timeline", {})
         if tl:
-            ekfs = []
             for ts, evts in tl.items():
                 try: tv = float(ts)
                 except: continue
@@ -544,7 +544,11 @@ def convert_animations_to_bb(anim_data, bone_to_uuid, model_name):
                 else:
                     script = str(evts)
                 try:
-                    _lua = molang2lua(script)
+                    # timeline entries are multi-statement molang blocks
+                    # (e.g. "v.jump=q.is_jumping; v.qh=...; v.random=...").
+                    # molang2lua is expression-only and would drop every
+                    # statement after the first; use the block compiler.
+                    _lua = molang2lua_block(script)
                 except Exception:
                     _lua = "nil"
                 # YSM binds query.anim_time inside timeline/instruction keyframes to the
@@ -563,8 +567,39 @@ def convert_animations_to_bb(anim_data, bone_to_uuid, model_name):
                             "ysm_state._kf_at=_p end)()")
                 ekfs.append({"channel": "timeline", "interpolation": "linear", "time": tv,
                              "data_points": [{"script": _wrapped}]})
-            if ekfs:
-                bb["animators"]["effects"] = {"keyframes": ekfs}
+        # ---- keyframe sound + particle effects (YSM/geckolib SoundKeyframe & ParticleKeyframe) ----
+        # The mod fires these at the animation's LOCAL playback time. Figura has no native
+        # sound/particle keyframe channel, so we emit them as instruction ("timeline") keyframes
+        # that invoke the same ysm.play_sound / ysm.particle runtime helpers, firing once when the
+        # playhead crosses that time -- matching OpenYSM semantics.
+        def _eff_name(_e):
+            if isinstance(_e, dict):
+                return _e.get("effect") or _e.get("sound") or _e.get("particle") or ""
+            return str(_e) if _e is not None else ""
+        def _eff_esc(_s):
+            return str(_s).replace("\\", "\\\\").replace("'", "\\'")
+        for _ts, _ev in (anim_obj.get("sound_effects", {}) or {}).items():
+            try: _tv = float(_ts)
+            except (TypeError, ValueError): continue
+            for _e in (_ev if isinstance(_ev, list) else [_ev]):
+                _nm = _eff_name(_e)
+                if not _nm: continue
+                _e2 = _eff_esc(_nm)
+                _script = "pcall(function() ysm.play_sound('" + _e2 + "','" + _e2 + "',1) end)"
+                ekfs.append({"channel": "timeline", "interpolation": "linear", "time": _tv,
+                             "data_points": [{"script": _script}]})
+        for _ts, _ev in (anim_obj.get("particle_effects", {}) or {}).items():
+            try: _tv = float(_ts)
+            except (TypeError, ValueError): continue
+            for _e in (_ev if isinstance(_ev, list) else [_ev]):
+                _nm = _eff_name(_e)
+                if not _nm: continue
+                _script = "pcall(function() ysm.particle('" + _eff_esc(_nm) + "') end)"
+                ekfs.append({"channel": "timeline", "interpolation": "linear", "time": _tv,
+                             "data_points": [{"script": _script}]})
+        if ekfs:
+            ekfs.sort(key=lambda _k: _k["time"])
+            bb["animators"]["effects"] = {"keyframes": ekfs}
         _flip_x_anim(bb)
         _smooth_interp_fallback(bb)
         bb_anims.append(bb)
@@ -699,6 +734,9 @@ def generate_bbmodels(ysm_path, project_dir, model_name, files_section, annotati
     all_dynamic_bones = {}
     all_bone_paths = {}
     role_models = {}
+    # Projectile sub-entities (arrow/trident) that main.lua wires onto the
+    # corresponding Figura projectile via the "Arrow"/"Trident" parent type.
+    projectile_models = []
 
     # Main model
     main_path = ysm_path / ms.get("main", "")
@@ -815,13 +853,25 @@ def generate_bbmodels(ysm_path, project_dir, model_name, files_section, annotati
             sd = read_json(sp)
             if not sd: continue
             sels, sout, sbuuid, _, _, sbpath = convert_geometry_to_bb(sd)
+            # Sub-entity models (arrow, trident, ...) carry their OWN texture
+            # resolution; reusing the main model's tw/th here garbled their UVs.
+            _sdesc = (sd.get("minecraft:geometry", [{}]) or [{}])[0].get("description", {})
+            stw = int(_sdesc.get("texture_width", 16))
+            sth = int(_sdesc.get("texture_height", 16))
             def _hide_tree(g):
                 if isinstance(g, dict):
                     g["visibility"] = False
                     for c in (g.get("children", []) or []):
                         _hide_tree(c)
-            for g in sout:
-                _hide_tree(g)
+            # Projectiles MUST stay visible: Figura renders an "Arrow"/"Trident"
+            # parent-typed part directly on the projectile entity (a "separate"
+            # part that is skipped in the body pass), so hiding it here would
+            # leave the reskinned arrow/trident invisible in flight. Vehicles
+            # have no Figura render hook, so keep hiding them to avoid the model
+            # rendering on the player body at the origin.
+            if stype == "vehicles":
+                for g in sout:
+                    _hide_tree(g)
             all_bone_paths.update(sbpath)
             sanims = []
             sap = se.get("animation")
@@ -834,10 +884,23 @@ def generate_bbmodels(ysm_path, project_dir, model_name, files_section, annotati
             stp = se.get("texture")
             if stp: stex = build_texture_list(ysm_path, {"texture": stp}, f"{model_name}_{match_id}")
             sn = match_id.replace(":", "_")
-            sbb = build_bbmodel(sels, sout, sanims, stex, tw, th, sn)
+            sbb = build_bbmodel(sels, sout, sanims, stex, stw, sth, sn)
             spath = project_dir / f"{model_name}_{sn}.bbmodel"
             with open(spath, "w", encoding="utf-8") as f:
                 json.dump(sbb, f, indent=2, ensure_ascii=False)
             print(f"  {spath.name}: {len(sels)} elements, {len(sanims)} animations ({stype})")
+            if stype == "projectiles":
+                # Map the YSM projectile match id to the Figura parent type that
+                # makes this model render on that entity. "trident" -> Trident;
+                # everything else (arrow, spectral_arrow, tipped arrow, ...) ->
+                # Arrow. ParentType.get() in Figura matches by startsWith, so the
+                # bare "Arrow"/"Trident" aliases resolve correctly.
+                _ml = str(match_id).lower()
+                _ptype = "Trident" if "trident" in _ml else "Arrow"
+                projectile_models.append({
+                    "stem": f"{model_name}_{sn}",
+                    "match": match_id,
+                    "parent_type": _ptype,
+                })
 
-    return all_dynamic_bones, all_bone_paths, role_models
+    return all_dynamic_bones, all_bone_paths, role_models, projectile_models

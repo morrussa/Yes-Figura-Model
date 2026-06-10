@@ -56,11 +56,11 @@ def convert(ysm_path_str, output_dir_str, optimize=True, annotations=None, scaff
 
     # 1. Generate .bbmodel files
     print(f"\n  [.bbmodel]")
-    dynamic_bones, bone_paths, role_models = bb.generate_bbmodels(ysm_path, project_dir, model_name, files, annotations=ann)
+    dynamic_bones, bone_paths, role_models, projectile_models = bb.generate_bbmodels(ysm_path, project_dir, model_name, files, annotations=ann)
 
     # 2. Generate main.lua
     print(f"\n  [main.lua]")
-    lua_gen.gen_lua(ysm_path, project_dir, model_name, ysm_json, {}, dynamic_bones, bone_paths, optimize=optimize, annotations=ann, role_models=role_models)
+    lua_gen.gen_lua(ysm_path, project_dir, model_name, ysm_json, {}, dynamic_bones, bone_paths, optimize=optimize, annotations=ann, role_models=role_models, projectile_models=projectile_models)
 
     # 3. Write avatar.json
     authors = [a.get("name","") for a in meta.get("authors",[])]
@@ -85,6 +85,20 @@ def convert(ysm_path_str, output_dir_str, optimize=True, annotations=None, scaff
             if f.suffix.lower() in ('.png','.jpg','.jpeg','.bmp','.webp'):
                 shutil.copy2(str(f), str(dst_tex / f"{model_name}.{f.name}"))
         print(f"  textures/ copied")
+
+    # 4b. Copy sounds. Figura registers each custom .ogg by its path relative to
+    # the avatar root (separators -> "."). We copy sound files to the project
+    # root so the registered name equals the bare effect name used by YSM
+    # sound_effects keyframes (e.g. "click"), so ysm.play_sound('click') resolves.
+    src_snd = ysm_path / "sounds"
+    if src_snd.exists():
+        n_snd = 0
+        for f in src_snd.iterdir():
+            if f.suffix.lower() == '.ogg':
+                shutil.copy2(str(f), str(project_dir / f.name))
+                n_snd += 1
+        if n_snd:
+            print(f"  sounds/ copied ({n_snd})")
 
     print(f"\nDone! Project at: {project_dir}")
     return project_dir
